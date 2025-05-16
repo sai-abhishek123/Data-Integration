@@ -1,56 +1,108 @@
 public class CSISIntegration {
-    public static final String CSIS_ENDPOINT = 'https://stage.apps.csis.wisc.edu/api/USI/PostRegistrationData';
-    
-    private static final String USERNAME = 'your_username_here';
-    private static final String PASSWORD = 'your_password_here';
-    
-    public static Boolean sendEventsWithJWT(List<conference360__Event__c> events) {
+
+    public static Boolean sendEventsWithJWT(List<conference360__Event__c> events, Set<Id> specificAttendeeIds) {
         if (events == null || events.isEmpty()) {
             System.debug(LoggingLevel.ERROR, 'CSIS Integration: Invalid input - events empty');
             return false;
         }
+        CSISIntegrationModels.setRegistrationStatus(null);
+        Set<Id> eventIds = new Set<Id>();
+        for (conference360__Event__c evt : events) {
+            eventIds.add(evt.Id);
+        }
+        
+        List<conference360__Event__c> fullEvents = [
+            SELECT Id, Name, externalId__c, Department__r.ATP_Id__c, Fiscal_Year__c, Department__r.Computed_ID__c,
+                   conference360__Event_Start_Date__c, conference360__Event_End_Date__c,
+                   Course_Offering__r.SectionNumber, conference360__Status__c, L3__c, EventID__c,
+                   Custom_Event_Page_URL__c, conference360__Organizer_Account__c,
+                   conference360__Organizer_Account__r.Computed_ID__c,
+                   conference360__Organizer_Account__r.Name
+            FROM conference360__Event__c 
+            WHERE Id IN :eventIds
+        ];
+        
+        // Map<Id, List<conference360__Attendee__c>> eventToAttendeesMap = new Map<Id, List<conference360__Attendee__c>>();
+        // for (conference360__Attendee__c attendee : [SELECT Id, Computed_ID__c, conference360__Event__c,
+        //            conference360__First_Name2__c, conference360__Last_Name2__c, 
+        //            conference360__Title__c, conference360__Street__c, conference360__City__c,
+        //            conference360__State__c, conference360__Postal_Code__c, conference360__Country__c,
+        //            conference360__Email2__c, conference360__Phone2__c, conference360__Registration_Status__c,
+        //            conference360__Contact__r.externalId__c, conference360__Contact__r.Fax,
+        //            conference360__Account__r.Name, conference360__Account__r.Computed_ID__c,
+        //            conference360__Event__r.EventID__c, conference360__Event__r.externalId__c,
+        //            conference360__Event__r.L3__c, conference360__Event_Item__r.conference360__Product__r.ProductCode,
+        //            conference360__Event_Item__r.conference360__Product__r.Product_Base__c
+        //     FROM conference360__Attendee__c
+        //     WHERE conference360__Event__c IN :eventIds
+        // ]) {
+        //     if (!eventToAttendeesMap.containsKey(attendee.conference360__Event__c)) {
+        //         eventToAttendeesMap.put(attendee.conference360__Event__c, new List<conference360__Attendee__c>());
+        //     }
+        //     eventToAttendeesMap.get(attendee.conference360__Event__c).add(attendee);
+        // }
+
+        Map<Id, List<conference360__Attendee__c>> eventToAttendeesMap = new Map<Id, List<conference360__Attendee__c>>();
+
+// Create a dynamic query string
+String attendeeQuery = 'SELECT Id, Computed_ID__c, conference360__Event__c, ' +
+                 'conference360__First_Name2__c, conference360__Last_Name2__c, ' +
+                 'conference360__Title__c, conference360__Street__c, conference360__City__c, ' +
+                 'conference360__State__c, conference360__Postal_Code__c, conference360__Country__c, ' +
+                 'conference360__Email2__c, conference360__Phone2__c, conference360__Registration_Status__c, ' +
+                 'conference360__Contact__r.externalId__c, conference360__Contact__r.Fax, ' +
+                 'conference360__Account__r.Name, conference360__Account__r.Computed_ID__c, ' +
+                 'conference360__Event__r.EventID__c, conference360__Event__r.externalId__c, ' +
+                 'conference360__Event__r.L3__c, conference360__Event_Item__r.conference360__Product__r.ProductCode, ' +
+                 'conference360__Event_Item__r.conference360__Product__r.Product_Base__c ' +
+                 'FROM conference360__Attendee__c ' +
+                 'WHERE conference360__Event__c IN :eventIds'; 
+
+if (specificAttendeeIds != null && !specificAttendeeIds.isEmpty()) {
+    attendeeQuery += ' AND Id IN :specificAttendeeIds';
+}
+
+for (conference360__Attendee__c attendee : Database.query(attendeeQuery)) {
+    if (!eventToAttendeesMap.containsKey(attendee.conference360__Event__c)) {
+        eventToAttendeesMap.put(attendee.conference360__Event__c, new List<conference360__Attendee__c>());
+    }
+    eventToAttendeesMap.get(attendee.conference360__Event__c).add(attendee);
+}
         
         Boolean overallSuccess = true;
+        List<conference360__Event__c> eventsToUpdate = new List<conference360__Event__c>();
+        List<conference360__Attendee__c> attendeesToUpdate = new List<conference360__Attendee__c>();
+        Datetime now = Datetime.now();
         
-        for (conference360__Event__c event : events) {
-            List<EventDataModel> eventModels = new List<EventDataModel>();
-            Map<Id, List<RegistrantDataModel>> eventToRegistrantsMap = new Map<Id, List<RegistrantDataModel>>();
+        for (conference360__Event__c event : fullEvents) {
+            CSISIntegrationModels.EventDataModel eventModel = new CSISIntegrationModels.EventDataModel(event);
+            List<CSISIntegrationModels.CsisRegistrant> registrantModels = new List<CSISIntegrationModels.CsisRegistrant>();
             
-            eventModels.add(new EventDataModel(event));
-            eventToRegistrantsMap.put(event.Id, new List<RegistrantDataModel>());
-            
-            List<conference360__Attendee__c> attendees = [
-                SELECT conference360__Contact__r.externalId__c, Computed_ID__c,
-                       conference360__Contact__r.FirstName, conference360__Contact__r.LastName, 
-                       conference360__Contact__r.Title, conference360__Account__r.Name,
-                       conference360__Contact__r.Address__Street__s, conference360__Contact__r.Address__City__s, 
-                       conference360__Contact__r.Address__StateCode__s, conference360__Contact__r.Address__PostalCode__s, 
-                       conference360__Contact__r.Address__CountryCode__s, conference360__Contact__r.Email, 
-                       conference360__Contact__r.Phone, conference360__Contact__r.Fax,
-                       conference360__Contact__r.AccountId, conference360__Event__r.externalId__c,
-                       conference360__Event__c, conference360__Event__r.L3__c
-                FROM conference360__Attendee__c
-                WHERE conference360__Event__c = :event.Id
-            ];
+            List<conference360__Attendee__c> attendees = eventToAttendeesMap.containsKey(event.Id) 
+                ? eventToAttendeesMap.get(event.Id) 
+                : new List<conference360__Attendee__c>();
             
             for (conference360__Attendee__c attendee : attendees) {
-                RegistrantDataModel registrantModel = new RegistrantDataModel(attendee);
-                eventToRegistrantsMap.get(event.Id).add(registrantModel);
+                CSISIntegrationModels.CsisRegistrant registrantModel = new CSISIntegrationModels.CsisRegistrant(attendee);
+                registrantModels.add(registrantModel);
+                
+                attendeesToUpdate.add(new conference360__Attendee__c(
+                    Id = attendee.Id,
+                    integration_done__c = true,
+                    date_time_sent_to_csis__c = now
+                ));
             }
             
-            CSISPayloadWrapper payload = new CSISPayloadWrapper(eventModels, eventToRegistrantsMap);
+            CSISIntegrationModels.CSISPayload payload = new CSISIntegrationModels.CSISPayload();
+            payload.data.eventData = eventModel;
+            payload.data.registrants = registrantModels.isEmpty() ? null : registrantModels;
+            
             String jsonBody = JSON.serialize(payload);
-            System.debug('CSIS JSON Payload for event ' + event.Id + ': ' + jsonBody);
+            System.debug('CSIS JSON Payload: ' + jsonBody);
             
             HttpRequest req = new HttpRequest();
-            req.setEndpoint(CSIS_ENDPOINT);
+            req.setEndpoint('callout:CSIS_Endpoint');
             req.setMethod('POST');
-            req.setHeader('Content-Type', 'application/json');
-            
-            String auth = USERNAME + ':' + PASSWORD;
-            String encodedAuth = EncodingUtil.base64Encode(Blob.valueOf(auth));
-            req.setHeader('Authorization', 'Basic ' + encodedAuth);
-            
             req.setBody(jsonBody);
             req.setTimeout(120000);
             
@@ -62,8 +114,13 @@ public class CSISIntegration {
                 boolean success = res.getStatusCode() >= 200 && res.getStatusCode() < 300;
                 
                 if (success) {
-                    updateIntegrationStatus(new List<conference360__Event__c>{event}, attendees);
+                    eventsToUpdate.add(new conference360__Event__c(
+                        Id = event.Id,
+                        Event_Data_Sent_to_CSIS__c = true,
+                        CSIS_Transmission_Timestamp__c = now
+                    ));
                 } else {
+                    System.debug(LoggingLevel.ERROR, 'Failed to send event to CSIS: ' + res.getStatusCode() + ': ' + res.getBody());
                     overallSuccess = false;
                 }
             } catch(Exception ex) {
@@ -72,219 +129,233 @@ public class CSISIntegration {
             }
         }
         
+        if (!eventsToUpdate.isEmpty()) {
+            update eventsToUpdate;
+        }
+        
+        if (!attendeesToUpdate.isEmpty()) {
+            update attendeesToUpdate;
+        }
+        
         return overallSuccess;
     }
-    
-    private static void updateIntegrationStatus(List<conference360__Event__c> events, List<conference360__Attendee__c> attendees) {
+public static Boolean sendEventsWithJWT(List<conference360__Event__c> events) {
+    // This preserves backward compatibility
+    return sendEventsWithJWT(events, null);
+}
+    public static Boolean sendOrderToCsis(String orderExternalId) {
+        System.debug('Order External ID: ' + orderExternalId);
+        if (String.isBlank(orderExternalId)) {
+            return false;
+        }
+        CSISIntegrationModels.setRegistrationStatus(null);
         try {
-            List<conference360__Event__c> eventsToUpdate = new List<conference360__Event__c>();
-            List<conference360__Attendee__c> attendeesToUpdate = new List<conference360__Attendee__c>();
-            Datetime now = Datetime.now();
+            bt_stripe__Sales_Document__c orderDoc = [
+                SELECT Id, externalId__c, bt_stripe__Bill_To__c, Name,
+                       bt_stripe__Bill_To__r.externalId__c, bt_stripe__Payment_Status__c, 
+                       conference360__Event__c, conference360__Event__r.externalId__c, conference360__Event__r.EventID__c,
+                       conference360__Event__r.conference360__Organizer_Account__r.Computed_ID__c,
+                       bt_stripe__Total_Amount__c, bt_stripe__Balance_Paid_Amount__c, createdDate, 
+                       bt_stripe__Balance_Due_Amount__c, LastModifiedDate, bt_stripe__Tax_Amount__c, 
+                       conference360__Event__r.L3__c, bt_stripe__Bill_To__r.Computed_ID__c, bt_Stripe__Status__c
+                FROM bt_stripe__Sales_Document__c 
+                WHERE externalId__c = :orderExternalId
+                LIMIT 1
+            ];
             
-            for (conference360__Event__c event : events) {
-                eventsToUpdate.add(new conference360__Event__c(
-                    Id = event.Id,
-                    integration_done__c = true,
-                    date_time_sent_to_csis__c = now
-                ));
-            }
+            conference360__Attendee__c relatedAttendee;
             
-            for (conference360__Attendee__c attendee : attendees) {
-                attendeesToUpdate.add(new conference360__Attendee__c(
-                    Id = attendee.Id,
-                    integration_done__c = true,
-                    date_time_sent_to_csis__c = now
-                ));
+            try {
+                relatedAttendee = [
+                SELECT Id, Computed_ID__c, conference360__Event__c, conference360__Sales_Document__c,
+               conference360__First_Name2__c, conference360__Last_Name2__c, 
+               conference360__Title__c, conference360__Street__c, conference360__City__c,
+               conference360__State__c, conference360__Postal_Code__c, conference360__Country__c,
+               conference360__Email2__c, conference360__Phone2__c, conference360__Registration_Status__c,
+               conference360__Contact__r.externalId__c, conference360__Contact__r.Fax,
+               conference360__Account__r.Name, conference360__Account__r.Computed_ID__c,
+               conference360__Event__r.externalId__c, conference360__Event__r.L3__c, conference360__Event__r.EventID__c,
+               conference360__Event_Item__r.conference360__Product__r.ProductCode,
+               conference360__Event_Item__r.conference360__Product__r.Product_Base__c
+        FROM conference360__Attendee__c 
+        WHERE conference360__Sales_Document__c = :orderDoc.Id 
+        LIMIT 1
+    ];
+            } catch (Exception e) {
+                relatedAttendee = null;
+                System.debug('No related attendee found via direct relationship: ' + e.getMessage());
             }
-            
-            if (!eventsToUpdate.isEmpty() || !attendeesToUpdate.isEmpty()) {
-                updateRecordsFuture(JSON.serialize(eventsToUpdate), JSON.serialize(attendeesToUpdate));
-            }
-        } catch (Exception ex) {
-            System.debug('Error updating integration status: ' + ex.getMessage());
-        }
-    }
-    
-    @future
-    private static void updateRecordsFuture(String serializedEvents, String serializedAttendees) {
-        try {
-            if (String.isNotBlank(serializedEvents)) {
-                List<conference360__Event__c> events = 
-                    (List<conference360__Event__c>)JSON.deserialize(serializedEvents, 
-                                                                List<conference360__Event__c>.class);
-                if (!events.isEmpty()) {
-                    update events;
-                    System.debug('Successfully updated ' + events.size() + ' events with integration status');
-                }
-            }
-            
-            if (String.isNotBlank(serializedAttendees)) {
-                List<conference360__Attendee__c> attendees = 
-                    (List<conference360__Attendee__c>)JSON.deserialize(serializedAttendees, 
-                                                                    List<conference360__Attendee__c>.class);
-                if (!attendees.isEmpty()) {
-                    update attendees;
-                    System.debug('Successfully updated ' + attendees.size() + ' attendees with integration status');
-                }
-            }
-        } catch (Exception ex) {
-            System.debug('Error in future update: ' + ex.getMessage());
-        }
-    }
-    
-    private static String getStatusCode(String status) {
-        if (status == null) return null;
-        if (status == 'Canceled') return '40';
-        else if (status == 'Closed') return '45';
-        else if (status == 'Completed') return '50';
-        else if (status == 'On Hold') return '35';
-        else if (status == 'Pending') return '28';
-        else if (status == 'Request/Enquiry') return '10';
-        else if (status == 'Active') return '30';
-        else return status;
-    }
-    
-    public class EventDataModel {
-        public String EventID;
-        public String EventDesc;
-        public String EventClass;
-        public String EventCategory;
-        public String EventStartDate;
-        public String EventEndDate;
-        public String EventSearch;
-        public String EventCustomerNumber;
-        public String EventStatus;
-        public String L3;
-        public String WebAddress;
 
-        public EventDataModel(conference360__Event__c ev) {
-            System.debug('Idi ra event: ' + ev);
-            System.debug('Account ID: ' + ev.conference360__Organizer_Account__c);
-            System.debug('Account Relationship: ' + ev.conference360__Organizer_Account__c);
-            System.debug('Computed ID: ' + ev.conference360__Organizer_Account__r.Acc_Number__c);
-            this.EventID = ev.externalId__c;
-            this.EventDesc = ev.Name;
-            this.EventClass = ev.Department__r?.ATP_Id__c;
-            this.EventCategory = ev.Fiscal_Year__c;
-            this.EventStartDate = ev.conference360__Event_Start_Date__c != null ? 
-                            Datetime.newInstance(ev.conference360__Event_Start_Date__c, Time.newInstance(0, 0, 0, 0)).format('M/d/yyyy h:mm:ss a') : null;
-            this.EventEndDate = ev.conference360__Event_End_Date__c != null ? 
-                            Datetime.newInstance(ev.conference360__Event_End_Date__c, Time.newInstance(0, 0, 0, 0)).format('M/d/yyyy h:mm:ss a') : null;
-            this.EventSearch = ev.Course_Offering__r?.SectionNumber;
-            this.EventCustomerNumber = ev.conference360__Organizer_Account__r.Acc_Number__c;
-            this.EventStatus = getStatusCode(ev.conference360__Status__c);
-            this.L3 = ev.L3__c ? 'YES' : 'NO';
-            this.WebAddress = ev.conference360__Event_Page_URL__c;
-        }
-    }
-    
-    public class RegistrantDataModel {
-        public String RegAccountCode;
-        public String ExternalCode;
-        public String FirstName;
-        public String LastName;
-        public String Title;
-        public String CompanyName;
-        public String AddressLine1;
-        public String AddressLine2;
-        public String AddressLine3;
-        public String City;
-        public String StateCode;
-        public String PostalCode;
-        public String CountryCode;
-        public String EmailAddress;
-        public String MainPhone;
-        public String MainFax;
-        public String RegSeq;
-        public String EventId;
-        public List<String> Credentials;
-        public List<String> MergedAccountCodes;
-        public String L3;
-        
-        public RegistrantDataModel(conference360__Attendee__c att) {
-            this.RegAccountCode = att.conference360__Contact__r?.externalId__c;
-            this.ExternalCode = att.Computed_ID__c;
-            this.FirstName = att.conference360__Contact__r?.FirstName;
-            this.LastName = att.conference360__Contact__r?.LastName;
-            this.Title = att.conference360__Contact__r?.Title;
-            this.CompanyName = att.conference360__Account__r?.Name;
+            List<bt_stripe__Line_Item__c> lineItems = [
+                SELECT Id, bt_stripe__Sales_Document__c, bt_stripe__Sales_Document__r.externalId__c, bt_stripe__Sales_Document__r.Name,
+                        bt_stripe__Sort_Order__c, conference360__Attendee__c, conference360__Attendee__r.Computed_ID__c,
+                        conference360__Attendee__r.conference360__Account__r.Computed_ID__c,
+                        conference360__Attendee__r.conference360__Event_Item__r.conference360__Product__r.ProductCode,
+                        conference360__Event_Item__r.conference360__Product__r.Product_Base__c,
+                        conference360__Event_Item__r.conference360__Product__r.ProductCode,
+                        bt_stripe__Description__c, bt_stripe__Quantity__c, bt_stripe__List_Price__c, 
+                        bt_stripe__Tax_Amount__c, createdDate, LastModifiedDate, bt_stripe__Item_Name__c, Line_Item_Status__c,
+                        bt_stripe__Product__c, bt_stripe__Product__r.ProductCode, bt_stripe__Product__r.Product_Base__c
+                FROM bt_stripe__Line_Item__c 
+                WHERE bt_stripe__Sales_Document__r.externalId__c = :orderExternalId
+            ];
             
-            if (att.conference360__Contact__r?.Address__Street__s != null) {
-                List<String> addressLines = att.conference360__Contact__r.Address__Street__s.split('\n');
-                if (addressLines.size() > 0) this.AddressLine1 = addressLines[0];
-                if (addressLines.size() > 1) this.AddressLine2 = addressLines[1];
-                if (addressLines.size() > 2) this.AddressLine3 = addressLines[2];
-            } else {
-                this.AddressLine1 = null;
-                this.AddressLine2 = null;
-                this.AddressLine3 = null;
-            }
-            
-            this.City = att.conference360__Contact__r?.Address__City__s;
-            this.StateCode = att.conference360__Contact__r?.Address__StateCode__s;
-            this.PostalCode = att.conference360__Contact__r?.Address__PostalCode__s;
-            this.CountryCode = att.conference360__Contact__r?.Address__CountryCode__s;
-            this.EmailAddress = att.conference360__Contact__r?.Email;
-            
-            if (att.conference360__Contact__r?.Phone != null) {
-                this.MainPhone = att.conference360__Contact__r.Phone.replaceAll('[^0-9]', '');
-            }
-            
-            if (att.conference360__Contact__r?.Fax != null) {
-                this.MainFax = att.conference360__Contact__r.Fax.replaceAll('[^0-9]', '');
-            }
-            
-            if (att.Computed_ID__c != null) {
-                this.RegSeq = att.Computed_ID__c;
-            }
-            
-            this.EventId = att.conference360__Event__r?.externalId__c;
-            
-            this.Credentials = null;
-            this.MergedAccountCodes = null;
-            
-            this.L3 = att.conference360__Event__r?.L3__c ? 'YES' : 'NO';
-        }
-    }
-
-    public class CSISPayloadWrapper {
-        public Object data;
-        
-        public CSISPayloadWrapper(Object eventData) {
-            if (eventData instanceof List<EventDataModel> && !((List<EventDataModel>)eventData).isEmpty()) {
-                this.data = new Map<String,Object>{
-                    'eventData' => ((List<EventDataModel>)eventData)[0],
-                    'registrants' => null
-                };
-            } else {
-                this.data = new Map<String,Object>{
-                    'eventData' => eventData,
-                    'registrants' => null
-                };
-            }
-        }
-        
-        public CSISPayloadWrapper(List<EventDataModel> eventData, Map<Id, List<RegistrantDataModel>> eventToRegistrantsMap) {
-            List<RegistrantDataModel> allRegistrants = new List<RegistrantDataModel>();
-            
-            EventDataModel singleEvent = null;
-            if (!eventData.isEmpty()) {
-                singleEvent = eventData[0];
-                
-                Id eventId = null;
-                for (Id eId : eventToRegistrantsMap.keySet()) {
-                    if (eventToRegistrantsMap.get(eId) != null && !eventToRegistrantsMap.get(eId).isEmpty()) {
-                        eventId = eId;
-                        allRegistrants = eventToRegistrantsMap.get(eId);
-                        break;
+            Set<Id> attendeeIds = new Set<Id>();
+            if (relatedAttendee == null) {
+                for (bt_stripe__Line_Item__c item : lineItems) {
+                    if (item.conference360__Attendee__c != null) {
+                        attendeeIds.add(item.conference360__Attendee__c);
                     }
                 }
             }
             
-            this.data = new Map<String,Object>{
-                'eventData' => singleEvent,
-                'registrants' => allRegistrants
-            };
+            List<conference360__Attendee__c> attendees = new List<conference360__Attendee__c>();
+            if (!attendeeIds.isEmpty()) {
+                attendees = [
+                    SELECT Id, Computed_ID__c, conference360__Event__c, conference360__Sales_Document__c,
+                           conference360__First_Name2__c, conference360__Last_Name2__c, 
+                           conference360__Title__c, conference360__Street__c, conference360__City__c,
+                           conference360__State__c, conference360__Postal_Code__c, conference360__Country__c,
+                           conference360__Email2__c, conference360__Phone2__c, conference360__Registration_Status__c,
+                           conference360__Contact__r.externalId__c, conference360__Contact__r.Fax,
+                           conference360__Account__r.Name, conference360__Account__r.Computed_ID__c,
+                           conference360__Event__r.externalId__c, conference360__Event__r.L3__c, conference360__Event__r.EventID__c,
+                           conference360__Event_Item__r.conference360__Product__r.ProductCode,
+                           conference360__Event_Item__r.conference360__Product__r.Product_Base__c
+                    FROM conference360__Attendee__c
+                    WHERE Id IN :attendeeIds
+                ];
+            } else if (relatedAttendee == null && orderDoc.conference360__Event__c != null && orderDoc.bt_stripe__Bill_To__c != null) {
+                attendees = [
+                    SELECT Id, Computed_Id__c, conference360__Event__c, conference360__Sales_Document__c,
+                           conference360__First_Name2__c, conference360__Last_Name2__c, 
+                           conference360__Title__c, conference360__Street__c, conference360__City__c,
+                           conference360__State__c, conference360__Postal_Code__c, conference360__Country__c,
+                           conference360__Email2__c, conference360__Phone2__c, conference360__Registration_Status__c,
+                           conference360__Contact__r.externalId__c, conference360__Contact__r.Fax,
+                           conference360__Account__r.Name, conference360__Account__r.Computed_ID__c,
+                           conference360__Event__r.externalId__c, conference360__Event__r.L3__c, conference360__Event__r.EventID__c,
+                           conference360__Event_Item__r.conference360__Product__r.ProductCode,
+                           conference360__Event_Item__r.conference360__Product__r.Product_Base__c
+                    FROM conference360__Attendee__c
+                    WHERE conference360__Event__c = :orderDoc.conference360__Event__c 
+                    AND conference360__Contact__r.AccountId = :orderDoc.bt_stripe__Bill_To__c
+                    LIMIT 5
+                ];
+            }
+            
+            return sendOrderAndRegistrantsToCSIS(orderDoc, lineItems, attendees, relatedAttendee);
+            
+        } catch (Exception ex) {
+            System.debug(LoggingLevel.ERROR, 'CSIS Order Integration error: ' + ex.getMessage());
+            return false;
+        }
+    }
+    
+    private static Boolean sendOrderAndRegistrantsToCSIS(bt_stripe__Sales_Document__c orderDoc, List<bt_stripe__Line_Item__c> lineItems, List<conference360__Attendee__c> attendees, conference360__Attendee__c attendeeWithStatus) {
+        CSISIntegrationModels.setRegistrationStatus(null);
+        List<CSISIntegrationModels.CsisRegistrant> registrantModels = new List<CSISIntegrationModels.CsisRegistrant>();
+        
+        String registrationStatus = null;
+        
+        if (attendeeWithStatus != null) {
+            registrationStatus = attendeeWithStatus.conference360__Registration_Status__c;
+            CSISIntegrationModels.CsisRegistrant statusRegistrantModel = new CSISIntegrationModels.CsisRegistrant(attendeeWithStatus);
+            registrantModels.add(statusRegistrantModel);
+        } else if (attendees != null && !attendees.isEmpty()) {
+            registrationStatus = attendees[0].conference360__Registration_Status__c;
+            CSISIntegrationModels.CsisRegistrant registrantModel = new CSISIntegrationModels.CsisRegistrant(attendees[0]);
+            registrantModels.add(registrantModel);
+        }
+        
+        CSISIntegrationModels.setRegistrationStatus(registrationStatus);
+        
+        CSISIntegrationModels.CsisOrderData orderModel = new CSISIntegrationModels.CsisOrderData(orderDoc);
+        
+        if (registrationStatus == 'Canceled') {
+            orderModel.OrderStatus = 'X';
+        }
+        
+        if (attendeeWithStatus == null && attendees != null && !attendees.isEmpty() && registrantModels.size() < attendees.size()) {
+            for (Integer i = 1; i < attendees.size(); i++) {
+                CSISIntegrationModels.CsisRegistrant registrantModel = new CSISIntegrationModels.CsisRegistrant(attendees[i]);
+                registrantModels.add(registrantModel);
+            }
+        }
+
+        if (registrantModels.isEmpty()) {
+    orderModel.OrderType = 'SO';
+    
+    if (String.isBlank(orderModel.OrderAccount) && orderDoc.conference360__Event__c != null) {
+        try {
+            conference360__Event__c event = [
+                SELECT Id, conference360__Organizer_Account__r.Computed_ID__c
+                FROM conference360__Event__c
+                WHERE Id = :orderDoc.conference360__Event__c
+                LIMIT 1
+            ];
+            
+            if (event != null && event.conference360__Organizer_Account__r != null) {
+                orderModel.OrderAccount = event.conference360__Organizer_Account__r.Computed_ID__c;
+            }
+        } catch (Exception ex) {
+            System.debug(LoggingLevel.ERROR, 'Error getting event account: ' + ex.getMessage());
+        }
+    }
+} else {
+    orderModel.OrderType = 'ER';
+}
+
+        for (bt_stripe__Line_Item__c lineItem : lineItems) {
+            CSISIntegrationModels.OrderItem itemModel = new CSISIntegrationModels.OrderItem(lineItem);
+            orderModel.OrderItems.add(itemModel);
+        }
+        
+        CSISIntegrationModels.CSISPayload payload = new CSISIntegrationModels.CSISPayload();
+        payload.data.orderData = orderModel;
+        payload.data.registrants = registrantModels.isEmpty() ? null : registrantModels;
+        
+        String jsonBody = JSON.serialize(payload);
+        System.debug('CSIS Order JSON Payload: ' + jsonBody);
+        
+        HttpRequest req = new HttpRequest();
+        req.setEndpoint('callout:CSIS_Endpoint');
+        req.setMethod('POST');
+        req.setBody(jsonBody);
+        req.setTimeout(120000);
+
+        Http http = new Http();
+        try {
+            HttpResponse res = http.send(req);
+            System.debug('CSIS Order callout response: ' + res.getBody());
+            
+            boolean success = res.getStatusCode() >= 200 && res.getStatusCode() < 300;
+            
+            if (success) {
+                updateOrderIntegrationStatus(orderDoc.Id);
+            } else {
+                System.debug(LoggingLevel.ERROR, 'Failed to send order to CSIS: ' + res.getStatusCode() + ': ' + res.getBody());
+            }
+            
+            return success;
+        } catch(Exception ex) {
+            System.debug('CSIS Order callout exception: ' + ex.getMessage());
+            return false;
+        }
+    }
+    
+    @future
+    private static void updateOrderIntegrationStatus(Id orderId) {
+        try {
+            bt_stripe__Sales_Document__c orderToUpdate = new bt_stripe__Sales_Document__c(
+                Id = orderId,
+                Integration_Done__c = true,
+                Date_Time_Sent_To_CSIS__c = Datetime.now()
+            );
+            
+            update orderToUpdate;
+        } catch (Exception ex) {
+            System.debug('Error updating order integration status: ' + ex.getMessage());
         }
     }
 }

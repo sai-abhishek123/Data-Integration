@@ -1,11 +1,10 @@
+// CSISAttendeeBatch.cls
 global class CSISAttendeeBatch implements Database.Batchable<sObject>, Database.AllowsCallouts {
     
     private String query;
     
     global CSISAttendeeBatch() {
-        this.query = 'SELECT Id, Computed_ID__c, conference360__Event__c, ' +
-                    'integration_done__c, date_time_sent_to_csis__c ' +
-                    'FROM conference360__Attendee__c';
+        this.query = buildBaseQuery();
     }
     
     global CSISAttendeeBatch(String query) {
@@ -14,15 +13,16 @@ global class CSISAttendeeBatch implements Database.Batchable<sObject>, Database.
     
     global CSISAttendeeBatch(Boolean processOnlyNonIntegrated) {
         if (processOnlyNonIntegrated) {
-            this.query = 'SELECT Id, Computed_ID__c, conference360__Event__c, ' +
-                        'integration_done__c, date_time_sent_to_csis__c ' +
-                        'FROM conference360__Attendee__c ' +
-                        'WHERE integration_done__c = false OR integration_done__c = null';
+            this.query = buildBaseQuery() + ' WHERE integration_done__c = false OR integration_done__c = null';
         } else {
-            this.query = 'SELECT Id, Computed_ID__c, conference360__Event__c, ' +
-                        'integration_done__c, date_time_sent_to_csis__c ' +
-                        'FROM conference360__Attendee__c';
+            this.query = buildBaseQuery();
         }
+    }
+    
+    private String buildBaseQuery() {
+        return 'SELECT Id, Computed_ID__c, conference360__Event__c, ' +
+               'integration_done__c, date_time_sent_to_csis__c ' +
+               'FROM conference360__Attendee__c';
     }
     
     global Database.QueryLocator start(Database.BatchableContext bc) {
@@ -30,6 +30,8 @@ global class CSISAttendeeBatch implements Database.Batchable<sObject>, Database.
     }
     
     global void execute(Database.BatchableContext bc, List<conference360__Attendee__c> scope) {
+        if (scope.isEmpty()) return;
+        
         Map<Id, List<conference360__Attendee__c>> eventToAttendees = new Map<Id, List<conference360__Attendee__c>>();
         
         for (conference360__Attendee__c attendee : scope) {
@@ -42,15 +44,30 @@ global class CSISAttendeeBatch implements Database.Batchable<sObject>, Database.
         }
         
         if (!eventToAttendees.isEmpty()) {
-            Set<Id> eventIds = eventToAttendees.keySet();
+            processEventBatches(eventToAttendees.keySet());
+        }
+    }
+    
+    private void processEventBatches(Set<Id> eventIds) {
+        // Process in smaller batches to avoid governor limits
+        Integer batchSize = 5;
+        List<Id> eventIdsList = new List<Id>(eventIds);
+        
+        for (Integer i = 0; i < eventIdsList.size(); i += batchSize) {
+            Integer endIndex = Math.min(i + batchSize, eventIdsList.size());
+            Set<Id> batchEventIds = new Set<Id>();
+            
+            for (Integer j = i; j < endIndex; j++) {
+                batchEventIds.add(eventIdsList[j]);
+            }
             
             List<conference360__Event__c> events = [
                 SELECT Id, Name, externalId__c, Department__r.ATP_Id__c, Fiscal_Year__c, 
-                       conference360__Event_Start_Date__c, conference360__Event_End_Date__c, 
+                       conference360__Event_Start_Date__c, conference360__Event_End_Date__c, Computed_Id_Account__c,
                        Course_Offering__r.SectionNumber, conference360__Organizer_Account__r.Computed_ID__c, 
-                       conference360__Status__c, L3__c, conference360__Event_Page_URL__c
+                       conference360__Status__c, L3__c, Custom_Event_Page_URL__c
                 FROM conference360__Event__c 
-                WHERE Id IN :eventIds
+                WHERE Id IN :batchEventIds
             ];
             
             if (!events.isEmpty()) {
@@ -64,20 +81,23 @@ global class CSISAttendeeBatch implements Database.Batchable<sObject>, Database.
     }
     
     public static Id runBatch() {
-        return Database.executeBatch(new CSISAttendeeBatch(), 100);
+        return Database.executeBatch(new CSISAttendeeBatch(), 50);
     }
     
     public static Id runBatchForNonIntegrated() {
-        return Database.executeBatch(new CSISAttendeeBatch(true), 100);
+        return Database.executeBatch(new CSISAttendeeBatch(true), 50);
     }
     
     public static Id runBatchForRegAccountCode(String regAccountCode) {
-        String regQuery = 'SELECT Id, Computed_ID__c, conference360__Event__c, ' +
-                        'conference360__Contact__r.externalId__c, conference360__Contact__r.AccountId, ' +
-                        'Computed_ID__c, integration_done__c, date_time_sent_to_csis__c ' +
-                        'FROM conference360__Attendee__c ' +
-                        'WHERE conference360__Contact__r.externalId__c = \'' + regAccountCode + '\'';
-        
-        return Database.executeBatch(new CSISAttendeeBatch(regQuery), 100);
+        String regQuery = buildRegAccountCodeQuery(regAccountCode);
+        return Database.executeBatch(new CSISAttendeeBatch(regQuery), 50);
+    }
+    
+    private static String buildRegAccountCodeQuery(String regAccountCode) {
+        return 'SELECT Id, Computed_ID__c, conference360__Event__c, ' +
+               'conference360__Contact__r.externalId__c, conference360__Contact__r.AccountId, ' +
+               'Computed_ID__c, integration_done__c, date_time_sent_to_csis__c ' +
+               'FROM conference360__Attendee__c ' +
+               'WHERE conference360__Contact__r.externalId__c = \'' + String.escapeSingleQuotes(regAccountCode) + '\'';
     }
 }
